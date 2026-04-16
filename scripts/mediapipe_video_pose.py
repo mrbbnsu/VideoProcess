@@ -51,6 +51,12 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Optional frame limit for quick tests (0 means all frames)",
     )
+    parser.add_argument(
+        "--start-seconds",
+        type=float,
+        default=0.0,
+        help="Start processing from this timestamp in seconds",
+    )
     return parser.parse_args()
 
 
@@ -125,6 +131,10 @@ def main() -> None:
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
+    if args.start_seconds > 0:
+        start_ms = max(0.0, args.start_seconds * 1000.0)
+        cap.set(cv2.CAP_PROP_POS_MSEC, start_ms)
+
     writer = cv2.VideoWriter(
         str(output_video_path),
         cv2.VideoWriter_fourcc(*"mp4v"),
@@ -156,7 +166,10 @@ def main() -> None:
             frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             result = pose.process(frame_rgb)
 
-            row = [frame_idx, int((frame_idx / fps) * 1000)]
+            timestamp_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+            if timestamp_ms <= 0:
+                timestamp_ms = (args.start_seconds + (frame_idx / fps)) * 1000.0
+            row = [frame_idx, int(timestamp_ms)]
 
             if result.pose_landmarks:
                 detected_frames += 1
@@ -184,6 +197,7 @@ def main() -> None:
 
     print("MediaPipe pose processing completed.")
     print(f"Input: {input_path}")
+    print(f"Start seconds: {args.start_seconds:.3f}")
     print(f"Frames processed: {frame_idx}")
     print(f"Frames with pose detected: {detected_frames}")
     print(f"Annotated video: {output_video_path}")

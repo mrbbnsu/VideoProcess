@@ -1,5 +1,6 @@
 import argparse
 import csv
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,8 +26,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Test sync between T1_1 and T1_2 using MediaPipe pose timestamps."
     )
-    parser.add_argument("--video-a", default="data/raw/Video/T1_1.mp4")
-    parser.add_argument("--video-b", default="data/raw/Video/T1_2.mp4")
+    parser.add_argument("--video-a", default="D:\\AtWork\\Algrithrom\\VideoPoseRecognization\\data\\Subject\\qxf4.MOV")
+    parser.add_argument("--video-b", default="D:\\AtWork\\Algrithrom\\VideoPoseRecognization\\data\\Subject\\qxf5.MOV")
     parser.add_argument(
         "--output-csv",
         default="output/sync/T1_1_T1_2_sync.csv",
@@ -55,6 +56,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Shift video B timeline by media start-time difference before matching.",
     )
+    parser.add_argument(
+        "--extra-offset-ms-b",
+        type=float,
+        default=0.0,
+        help="Extra manual/event-based offset for video B in milliseconds (applied during matching).",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=100,
+        help="Log progress every N processed frames per video (0 disables progress logs).",
+    )
     return parser.parse_args()
 
 
@@ -66,7 +79,12 @@ def get_mp_solutions():
     return mp_solutions
 
 
-def extract_pose_timeline(video_path: Path, max_frames: int, stride: int) -> tuple[list[FramePose], float, datetime]:
+def extract_pose_timeline(
+    video_path: Path,
+    max_frames: int,
+    stride: int,
+    progress_every: int,
+) -> tuple[list[FramePose], float, datetime]:
     if not video_path.exists():
         raise FileNotFoundError(f"Video not found: {video_path}")
 
@@ -87,6 +105,8 @@ def extract_pose_timeline(video_path: Path, max_frames: int, stride: int) -> tup
 
     frames: list[FramePose] = []
     frame_idx = 0
+    start_ts = time.perf_counter()
+    total_estimate = max_frames if max_frames > 0 else None
 
     with mp_pose.Pose(
         static_image_mode=False,
@@ -125,6 +145,23 @@ def extract_pose_timeline(video_path: Path, max_frames: int, stride: int) -> tup
                     landmarks=landmarks,
                 )
             )
+
+            if progress_every > 0 and len(frames) % progress_every == 0:
+                elapsed = time.perf_counter() - start_ts
+                fps_proc = len(frames) / elapsed if elapsed > 0 else 0.0
+                if total_estimate is not None and fps_proc > 0:
+                    remaining = max(0.0, (total_estimate - len(frames)) / fps_proc)
+                    print(
+                        f"[{video_path.name}] processed={len(frames)}/{total_estimate} "
+                        f"(raw_frame_idx={frame_idx}) elapsed={elapsed:.1f}s "
+                        f"speed={fps_proc:.2f} fps eta={remaining:.1f}s"
+                    )
+                else:
+                    print(
+                        f"[{video_path.name}] processed={len(frames)} "
+                        f"(raw_frame_idx={frame_idx}) elapsed={elapsed:.1f}s "
+                        f"speed={fps_proc:.2f} fps"
+                    )
 
             frame_idx += 1
             if max_frames > 0 and len(frames) >= max_frames:
@@ -229,13 +266,26 @@ def main() -> None:
     video_a = Path(args.video_a)
     video_b = Path(args.video_b)
 
-    timeline_a, fps_a, start_a = extract_pose_timeline(video_a, args.max_frames, args.stride)
-    timeline_b, fps_b, start_b = extract_pose_timeline(video_b, args.max_frames, args.stride)
+    timeline_a, fps_a, start_a = extract_pose_timeline(
+        video_a,
+        args.max_frames,
+        args.stride,
+        args.progress_every,
+    )
+    timeline_b, fps_b, start_b = extract_pose_timeline(
+        video_b,
+        args.max_frames,
+        args.stride,
+        args.progress_every,
+    )
 
     offset_sec_b = 0.0
     if args.compensate_start_offset:
         # Shift B to A timeline so matching focuses on relative frame timing.
         offset_sec_b = (start_a - start_b).total_seconds()
+
+    # Apply additional fine offset (e.g., from gait-event alignment).
+    offset_sec_b += args.extra_offset_ms_b / 1000.0
 
     pairs = nearest_sync_pairs(
         timeline_a,
