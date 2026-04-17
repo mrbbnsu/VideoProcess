@@ -21,6 +21,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def clean_header_key(v: str) -> str:
+    return (v or "").replace("\ufeff", "").replace("\xa0", " ").strip().lower()
+
 def read_text_with_fallback(path: Path) -> tuple[str, str]:
     encodings = ["utf-8-sig", "gb18030", "gbk", "gb2312", "utf-16"]
     for enc in encodings:
@@ -52,6 +55,36 @@ def parse_bool_yno(v: str) -> int | None:
     return None
 
 
+def parse_start_seconds(v: str) -> float | None:
+    s = (v or "").strip()
+    if not s:
+        return None
+    s = s.replace(":", "_")
+    parts = [p for p in s.split("_") if p != ""]
+    if len(parts) == 1:
+        try:
+            return float(parts[0])
+        except ValueError:
+            return None
+    if len(parts) >= 2:
+        try:
+            mm = float(parts[0])
+            ss = float(parts[1])
+            return mm * 60.0 + ss
+        except ValueError:
+            return None
+    return None
+
+
+def normalize_side(v: str) -> str:
+    s = (v or "").strip().lower()
+    if s in {"left", "l", "左", "左侧"}:
+        return "Left"
+    if s in {"right", "r", "右", "右侧"}:
+        return "Right"
+    return ""
+
+
 def main() -> None:
     args = parse_args()
     in_path = Path(args.input_csv)
@@ -73,13 +106,75 @@ def main() -> None:
             continue
         rows.append(parts)
 
-    parsed: list[dict[str, str | int | None]] = []
-    for parts in rows:
+    parsed: list[dict[str, str | int | float | None]] = []
+
+    # If file already contains a header (e.g., manually enriched parsed file), reuse it.
+    header = rows[0] if rows else []
+    has_header = "video_name" in header or "subject_id" in header
+
+    data_rows = rows[1:] if has_header else rows
+    normalized_header = [clean_header_key(name) for name in header]
+    col_index = {clean_header_key(name): i for i, name in enumerate(header)} if has_header else {}
+    subject_pos_indices = []
+    if has_header:
+        subject_pos_indices = [
+            i
+            for i, name in enumerate(header)
+            if clean_header_key(name) in {"subject_pos", "subject_pos_side"}
+        ]
+
+    for parts in data_rows:
+        def pick(idx: int, key: str = "") -> str:
+            if has_header and key:
+                pos = col_index.get(clean_header_key(key))
+                if pos is None or pos >= len(parts):
+                    return ""
+                return parts[pos]
+            if idx >= len(parts):
+                return ""
+            return parts[idx]
+
         subject_id = parts[0]
         subject_name = parts[1]
         assessment_text = parts[2]
         video_name = parts[3]
         exo_yn = parts[4]
+
+        if has_header:
+            subject_id = pick(0, "subject_id")
+            subject_name = pick(1, "subject_name")
+            assessment_text = pick(2, "assessment_text")
+            video_name = pick(3, "video_name")
+            exo_yn = pick(4, "exo_yes_no")
+
+        affected_side_raw = pick(10, "Affected Side")
+        start_time_raw = pick(11, "start_time")
+        subject_pos_side = pick(12, "subject_pos_side") or pick(12, "Subject_Pos")
+        subject_crop_ratio_raw = (
+            pick(13, "subject_crop_ratio")
+            or pick(13, "Subject_Crop")
+            or pick(13, "subject_crop")
+        )
+
+        # Handle duplicated Subject_Pos in manually edited CSV header.
+        if has_header and subject_pos_indices:
+            if subject_pos_indices[0] < len(parts):
+                subject_pos_side = parts[subject_pos_indices[0]]
+        crop_indices = []
+        if has_header:
+            crop_indices = [
+                i
+                for i, name in enumerate(header)
+                if clean_header_key(name) in {"subject_crop", "subject_crop_ratio"}
+            ]
+        if has_header and crop_indices:
+            if crop_indices[0] < len(parts):
+                subject_crop_ratio_raw = parts[crop_indices[0]]
+
+        try:
+            subject_crop_ratio = float(subject_crop_ratio_raw) if subject_crop_ratio_raw else None
+        except ValueError:
+            subject_crop_ratio = None
 
         fac = extract_score(assessment_text, "FAC")
         bbs = extract_score(assessment_text, "BBS")
@@ -99,6 +194,11 @@ def main() -> None:
                 "TIS": tis,
                 "FMA_LE": fma_le,
                 "assessment_text": assessment_text,
+                "affected_side": normalize_side(affected_side_raw),
+                "start_time": start_time_raw,
+                "start_seconds": parse_start_seconds(start_time_raw),
+                "subject_pos_side": normalize_side(subject_pos_side),
+                "subject_crop_ratio": subject_crop_ratio,
             }
         )
 
@@ -114,6 +214,11 @@ def main() -> None:
         "TIS",
         "FMA_LE",
         "assessment_text",
+        "affected_side",
+        "start_time",
+        "start_seconds",
+        "subject_pos_side",
+        "subject_crop_ratio",
     ]
     with out_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)

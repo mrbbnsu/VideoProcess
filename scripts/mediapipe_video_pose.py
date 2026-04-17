@@ -22,6 +22,11 @@ def parse_args() -> argparse.Namespace:
         help="Output annotated video path",
     )
     parser.add_argument(
+        "--no-output-video",
+        action="store_true",
+        help="Do not write annotated output video; only export CSV.",
+    )
+    parser.add_argument(
         "--output-csv",
         default="output/mediapipe/pose_landmarks.csv",
         help="Output landmarks CSV path",
@@ -117,7 +122,8 @@ def main() -> None:
     if not input_path.exists():
         raise FileNotFoundError(f"Input video not found: {input_path}")
 
-    output_video_path.parent.mkdir(parents=True, exist_ok=True)
+    if not args.no_output_video:
+        output_video_path.parent.mkdir(parents=True, exist_ok=True)
     output_csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     cap = cv2.VideoCapture(str(input_path))
@@ -135,12 +141,14 @@ def main() -> None:
         start_ms = max(0.0, args.start_seconds * 1000.0)
         cap.set(cv2.CAP_PROP_POS_MSEC, start_ms)
 
-    writer = cv2.VideoWriter(
-        str(output_video_path),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (width, height),
-    )
+    writer = None
+    if not args.no_output_video:
+        writer = cv2.VideoWriter(
+            str(output_video_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
 
     mp_solutions = get_mp_solutions()
     mp_pose = mp_solutions.pose
@@ -186,21 +194,26 @@ def main() -> None:
                     row.extend(["", "", "", ""])
 
             csv_writer.writerow(row)
-            writer.write(frame_bgr)
+            if writer is not None:
+                writer.write(frame_bgr)
 
             frame_idx += 1
             if args.max_frames > 0 and frame_idx >= args.max_frames:
                 break
 
     cap.release()
-    writer.release()
+    if writer is not None:
+        writer.release()
 
     print("MediaPipe pose processing completed.")
     print(f"Input: {input_path}")
     print(f"Start seconds: {args.start_seconds:.3f}")
     print(f"Frames processed: {frame_idx}")
     print(f"Frames with pose detected: {detected_frames}")
-    print(f"Annotated video: {output_video_path}")
+    if args.no_output_video:
+        print("Annotated video: [skipped]")
+    else:
+        print(f"Annotated video: {output_video_path}")
     print(f"Landmarks CSV: {output_csv_path}")
 
 
