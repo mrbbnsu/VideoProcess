@@ -88,19 +88,19 @@ def parse_start_seconds(value: str) -> float:
     s = (value or "").strip()
     if not s:
         return 0.0
+    # Check for underscore/colon first (MM_SS format) to avoid Python numeric literal parsing
+    if "_" in s or ":" in s:
+        s = s.replace(":", "_")
+        parts = [p for p in s.split("_") if p]
+        if len(parts) >= 2:
+            try:
+                return float(parts[0]) * 60.0 + float(parts[1])
+            except ValueError:
+                return 0.0
     try:
         return float(s)
     except ValueError:
-        pass
-
-    s = s.replace(":", "_")
-    parts = [p for p in s.split("_") if p]
-    if len(parts) >= 2:
-        try:
-            return float(parts[0]) * 60.0 + float(parts[1])
-        except ValueError:
-            return 0.0
-    return 0.0
+        return 0.0
 
 
 def clean_header_key(key: str) -> str:

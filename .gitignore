@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pkl
+*.pyc
+
+# IDE
+.vscode/
+.claude/
+*.bat
+
+# Data (video data, large files)
+data/
+
+# Output
+output/
+
+# Environment
+.env
+
+# OpenPose (downloaded from GitHub, not part of repo)
+openpose/
