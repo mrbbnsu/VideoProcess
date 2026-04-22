@@ -1,94 +1,28 @@
-import argparse
 import csv
-import subprocess
 import sys
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.workflow.single_video_angles_events import run
 
 
 VIDEO_EXTS = (".mp4", ".mov", ".avi", ".mkv", ".MP4", ".MOV", ".AVI", ".MKV")
 
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Run single_video_angles_events.py by one row in VFile_parsed.csv."
-    )
-    parser.add_argument(
-        "--parsed-csv",
-        default="data/Accessment/VFile_parsed.csv",
-        help="Path to VFile_parsed.csv",
-    )
-    parser.add_argument(
-        "--line-number",
-        type=int,
-        required=True,
-        help="1-based data row number in CSV (header excluded)",
-    )
-    parser.add_argument(
-        "--line-number-kind",
-        choices=["file", "data"],
-        default="data",
-        help="file: count with header; data: first data row is 1",
-    )
-    parser.add_argument(
-        "--video-root",
-        default="data/Accessment",
-        help="Root directory to search video files",
-    )
-    parser.add_argument(
-        "--seconds",
-        type=float,
-        default=10.0,
-        help="Duration to process",
-    )
-    parser.add_argument(
-        "--output-dir",
-        default="output/export",
-        help="Output directory for extracted artifacts",
-    )
-    parser.add_argument(
-        "--python",
-        default=sys.executable,
-        help="Python executable to run child script",
-    )
-    parser.add_argument(
-        "--single-person-lock",
-        dest="single_person_lock",
-        action="store_true",
-        help="Enable single person lock",
-    )
-    parser.add_argument(
-        "--no-single-person-lock",
-        dest="single_person_lock",
-        action="store_false",
-        help="Disable single person lock",
-    )
-    parser.set_defaults(single_person_lock=True)
-    parser.add_argument(
-        "--export-segment-video",
-        dest="export_segment_video",
-        action="store_true",
-        help="Export selected segment video",
-    )
-    parser.add_argument(
-        "--no-export-segment-video",
-        dest="export_segment_video",
-        action="store_false",
-        help="Do not export selected segment video",
-    )
-    parser.set_defaults(export_segment_video=True)
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Print resolved command only",
-    )
-    return parser.parse_args()
+# Default configuration
+DEFAULT_PARSED_CSV = str(PROJECT_ROOT / "data/Accessment/VFile_parsed.csv")
+DEFAULT_VIDEO_ROOT = str(PROJECT_ROOT / "data/Accessment")
+DEFAULT_SECONDS = 10.0
+DEFAULT_OUTPUT_DIR = str(PROJECT_ROOT / "output/export")
+line_number = 1
 
 
 def parse_start_seconds(value: str) -> float:
     s = (value or "").strip()
     if not s:
         return 0.0
-    # Check for underscore/colon first (MM_SS format) to avoid Python numeric literal parsing
     if "_" in s or ":" in s:
         s = s.replace(":", "_")
         parts = [p for p in s.split("_") if p]
@@ -104,8 +38,7 @@ def parse_start_seconds(value: str) -> float:
 
 
 def clean_header_key(key: str) -> str:
-    # Normalize invisible BOM/NBSP and surrounding whitespace in CSV headers.
-    return (key or "").replace("\ufeff", "").replace("\xa0", " ").strip()
+    return (key or "").replace("﻿", "").replace("\xa0", " ").strip()
 
 
 def row_get(row: dict[str, str], key: str, default: str = "") -> str:
@@ -124,15 +57,12 @@ def read_target_row(path: Path, line_number: int, kind: str) -> tuple[dict[str, 
         rows = list(reader)
 
     if kind == "file":
-        # DictReader starts from line 2 in the file.
         data_index = line_number - 2
     else:
         data_index = line_number - 1
 
     if data_index < 0 or data_index >= len(rows):
-        raise IndexError(
-            f"line out of range: line_number={line_number}, kind={kind}, data_rows={len(rows)}"
-        )
+        raise IndexError(f"line out of range: line_number={line_number}, kind={kind}, data_rows={len(rows)}")
 
     file_line = data_index + 2
     return rows[data_index], file_line
@@ -159,9 +89,7 @@ def resolve_video(video_name: str, video_root: Path) -> Path:
             candidates.extend(video_root.rglob(f"{stem}{ext}"))
 
     if not candidates:
-        raise FileNotFoundError(
-            f"cannot find video for '{name}' under {video_root.as_posix()}"
-        )
+        raise FileNotFoundError(f"cannot find video for '{name}' under {video_root.as_posix()}")
 
     candidates = sorted(set(p.resolve() for p in candidates))
     return candidates[0]
@@ -177,56 +105,33 @@ def to_crop_ratios(subject_pos_side: str, subject_crop_ratio: str) -> tuple[floa
     keep_ratio = max(0.0, min(keep_ratio, 1.0))
     crop_ratio = 1.0 - keep_ratio
     if side in {"right", "r", "右", "右侧"}:
-        # Keep right keep_ratio of width -> crop left (1 - keep_ratio).
         return crop_ratio, 0.0
     if side in {"left", "l", "左", "左侧"}:
-        # Keep left keep_ratio of width -> crop right (1 - keep_ratio).
         return 0.0, crop_ratio
     return 0.0, 0.0
 
 
 def main() -> None:
-    args = parse_args()
+    parsed_csv = Path(DEFAULT_PARSED_CSV)
+    seconds = DEFAULT_SECONDS
+    output_dir = DEFAULT_OUTPUT_DIR
 
-    parsed_csv = Path(args.parsed_csv)
     if not parsed_csv.exists():
         raise FileNotFoundError(parsed_csv)
-    if args.seconds <= 0:
-        raise ValueError("--seconds must be > 0")
+    if seconds <= 0:
+        raise ValueError("seconds must be > 0")
 
-    row, file_line = read_target_row(parsed_csv, args.line_number, args.line_number_kind)
+    row, file_line = read_target_row(parsed_csv, line_number, "data")
 
-    project_root = Path(__file__).resolve().parent.parent
-    video_root = Path(args.video_root)
+    video_root = Path(DEFAULT_VIDEO_ROOT)
     if not video_root.is_absolute():
-        video_root = (project_root / video_root).resolve()
+        video_root = (PROJECT_ROOT / video_root).resolve()
 
     video_path = resolve_video(row_get(row, "video_name", ""), video_root)
     start_seconds = parse_start_seconds(row_get(row, "start_seconds", "") or row_get(row, "start_time", ""))
     crop_left, crop_right = to_crop_ratios(
         row_get(row, "subject_pos_side", ""), row_get(row, "subject_crop_ratio", "")
     )
-
-    cmd = [
-        args.python,
-        str((project_root / "scripts" / "single_video_angles_events.py").resolve()),
-        "--video",
-        str(video_path),
-        "--start-seconds",
-        str(start_seconds),
-        "--seconds",
-        str(args.seconds),
-        "--output-dir",
-        str((project_root / args.output_dir).resolve()),
-        "--crop-left-ratio",
-        str(crop_left),
-        "--crop-right-ratio",
-        str(crop_right),
-    ]
-    if args.single_person_lock:
-        cmd.append("--single-person-lock")
-    if args.export_segment_video:
-        cmd.append("--export-segment-video")
 
     print("Resolved row")
     print(f"- parsed_csv={parsed_csv.as_posix()}")
@@ -238,15 +143,21 @@ def main() -> None:
     print(f"- subject_crop_ratio={row_get(row, 'subject_crop_ratio', '')}")
     print(f"- crop_left_ratio={crop_left}")
     print(f"- crop_right_ratio={crop_right}")
-    print("RUN:")
-    print(" ".join(cmd))
 
-    if args.dry_run:
-        return
+    result = run(
+        video=video_path,
+        start_seconds=start_seconds,
+        seconds=seconds,
+        output_dir=output_dir,
+        crop_left_ratio=crop_left,
+        crop_right_ratio=crop_right,
+        single_person_lock=True,
+        export_segment_video=True,
+    )
 
-    result = subprocess.run(cmd, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"child script failed with exit code {result.returncode}")
+    print("Result:")
+    for k, v in result.items():
+        print(f"  {k}={v}")
 
 
 if __name__ == "__main__":
