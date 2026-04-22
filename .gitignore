@@ -20,3 +20,6 @@ output/
 
 # OpenPose (downloaded from GitHub, not part of repo)
 openpose/
+
+# Downloaded model files
+models/
