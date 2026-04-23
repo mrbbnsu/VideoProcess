@@ -10,7 +10,7 @@ from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.core import base_options
 from mediapipe import Image, ImageFormat
 
-from scripts.analysis.evaluate_gait_event_consistency import detect_heel_strikes  # noqa: E402
+from scripts.analysis.evaluate_gait_event_consistency import detect_heel_strikes, match_events  # noqa: E402
 
 
 LOWER_BODY_IDS = [23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
@@ -55,6 +55,24 @@ def joint_angle(lms, a: int, b: int, c: int, min_vis: float) -> float:
 
 def finite_or_empty(v: float) -> str:
     return f"{v:.6f}" if math.isfinite(v) else ""
+
+
+def joint_distance(lms, i: int, j: int, min_vis: float) -> float | None:
+    """Euclidean distance between two landmarks (normalized 0-1 coordinates)."""
+    if i >= len(lms) or j >= len(lms):
+        return None
+    li, lj = lms[i], lms[j]
+    if li.visibility < min_vis or lj.visibility < min_vis:
+        return None
+    return math.hypot(li.x - lj.x, li.y - lj.y)
+
+
+def safe_ratio(num: float, den: float, default: float = float("nan")) -> float:
+    if not math.isfinite(num) or not math.isfinite(den):
+        return default
+    if abs(den) < 1e-12:
+        return default
+    return num / den
 
 
 def parse_float_or_nan(v: str) -> float:
@@ -212,9 +230,9 @@ def run(
     landmarker = vision.PoseLandmarker.create_from_options(options)
 
     rows: list[dict[str, str]] = []
-    times: list[float] = []
-    lheel_y: list[float] = []
-    rheel_y: list[float] = []
+    lheel_y: list[tuple[float, float]] = []  # (time, y_rel_hip)
+    rheel_y: list[tuple[float, float]] = []  # (time, y_rel_hip)
+    combined_y: list[tuple[float, float]] = []  # (time, min(l_rel, r_rel)) for cadence
 
     frame_idx = 0
     lock_rejected_frames = 0
@@ -323,6 +341,12 @@ def run(
             "right_ankle_deg": "",
             "left_heel_y": "",
             "right_heel_y": "",
+            # distance columns (normalized by shoulder width)
+            "shoulder_width": "",
+            "knee_width_norm": "",
+            "ankle_width_norm": "",
+            "base_of_support_norm": "",
+            "hip_width_norm": "",
         }
 
         if accepted_landmarks is not None:
@@ -344,15 +368,53 @@ def run(
 
             lh = point(lms, 29, min_vis)
             rh = point(lms, 30, min_vis)
-            if lh is not None:
-                out["left_heel_y"] = f"{lh[1]:.6f}"
-            if rh is not None:
-                out["right_heel_y"] = f"{rh[1]:.6f}"
+            l_hip_pt = point(lms, 23, min_vis)
+            r_hip_pt = point(lms, 24, min_vis)
+            hip_center_y = (l_hip_pt[1] + r_hip_pt[1]) / 2 if (l_hip_pt and r_hip_pt) else None
 
-            if lh is not None and rh is not None:
-                times.append(t)
-                lheel_y.append(lh[1])
-                rheel_y.append(rh[1])
+            l_rel = lh[1] - hip_center_y if (lh and hip_center_y is not None) else None
+            r_rel = rh[1] - hip_center_y if (rh and hip_center_y is not None) else None
+
+            if l_rel is not None:
+                out["left_heel_y"] = f"{l_rel:.6f}"
+                lheel_y.append((t, l_rel))
+            if r_rel is not None:
+                out["right_heel_y"] = f"{r_rel:.6f}"
+                rheel_y.append((t, r_rel))
+
+            # Use the lower heel per frame (closer to ground = stance foot).
+            # This gives correct cadence even when MediaPipe L/R assignment is unreliable.
+            if l_rel is not None and r_rel is not None:
+                combined_y.append((t, min(l_rel, r_rel)))
+            elif l_rel is not None:
+                combined_y.append((t, l_rel))
+            elif r_rel is not None:
+                combined_y.append((t, r_rel))
+
+            # Distance metrics normalized by shoulder width
+            sw = joint_distance(lms, 11, 12, min_vis)  # shoulder width (anchor)
+            if sw is not None and sw > 1e-8:
+                out["shoulder_width"] = f"{sw:.6f}"
+
+                # Hip width (left_hip to right_hip)
+                hw = joint_distance(lms, 23, 24, min_vis)
+                if hw is not None:
+                    out["hip_width_norm"] = f"{safe_ratio(hw, sw):.6f}"
+
+                # Knee width (left_knee to right_knee)
+                kw = joint_distance(lms, 25, 26, min_vis)
+                if kw is not None:
+                    out["knee_width_norm"] = f"{safe_ratio(kw, sw):.6f}"
+
+                # Ankle width (left_ankle to right_ankle)
+                aw = joint_distance(lms, 27, 28, min_vis)
+                if aw is not None:
+                    out["ankle_width_norm"] = f"{safe_ratio(aw, sw):.6f}"
+
+                # Step length: heel-to-heel distance (left heel idx=29, right heel idx=30)
+                if lh is not None and rh is not None:
+                    step_dist = math.hypot(lh[0] - rh[0], lh[1] - rh[1])
+                    out["base_of_support_norm"] = f"{safe_ratio(step_dist, sw):.6f}"
 
         rows.append(out)
         frame_idx += 1
@@ -376,13 +438,41 @@ def run(
                 "right_ankle_deg",
                 "left_heel_y",
                 "right_heel_y",
+                "shoulder_width",
+                "hip_width_norm",
+                "knee_width_norm",
+                "ankle_width_norm",
+                "base_of_support_norm",
             ],
         )
         writer.writeheader()
         writer.writerows(rows)
 
-    left_events = detect_heel_strikes(times, lheel_y, smooth_window, min_event_gap_ms, peak_threshold)
-    right_events = detect_heel_strikes(times, rheel_y, smooth_window, min_event_gap_ms, peak_threshold)
+    left_events = detect_heel_strikes(
+        [t for t, _ in lheel_y], [y for _, y in lheel_y],
+        smooth_window, min_event_gap_ms, peak_threshold
+    )
+    right_events = detect_heel_strikes(
+        [t for t, _ in rheel_y], [y for _, y in rheel_y],
+        smooth_window, min_event_gap_ms, peak_threshold
+    )
+    # Signal ranges for choosing the more reliable foot's time per pair
+    l_y_all = [y for _, y in lheel_y]
+    r_y_all = [y for _, y in rheel_y]
+    l_range = max(l_y_all) - min(l_y_all) if l_y_all else 0.0
+    r_range = max(r_y_all) - min(r_y_all) if r_y_all else 0.0
+    max_match_sec = 0.25
+    used_r = set()
+    all_events: list[float] = []
+    for lt in left_events:
+        for ri, rt in enumerate(right_events):
+            if ri in used_r:
+                continue
+            if abs(lt - rt) <= max_match_sec:
+                chosen_t = lt if l_range >= r_range else rt
+                all_events.append(chosen_t)
+                used_r.add(ri)
+                break
 
     with events_csv.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
@@ -391,6 +481,8 @@ def run(
             writer.writerow(["left", f"{t:.6f}"])
         for t in right_events:
             writer.writerow(["right", f"{t:.6f}"])
+        for t in all_events:
+            writer.writerow(["combined", f"{t:.6f}"])
 
     valid_t = [float(r["time_s"]) for r in rows]
     l_hip = [parse_float_or_nan(r["left_hip_deg"]) for r in rows]
@@ -398,7 +490,23 @@ def run(
     l_knee = [parse_float_or_nan(r["left_knee_deg"]) for r in rows]
     r_knee = [parse_float_or_nan(r["right_knee_deg"]) for r in rows]
 
-    fig, axes = plt.subplots(3, 1, figsize=(13, 9), sharex=True)
+    # Distance & symmetry metrics
+    knee_width_norm = [parse_float_or_nan(r["knee_width_norm"]) for r in rows]
+    ankle_width_norm = [parse_float_or_nan(r["ankle_width_norm"]) for r in rows]
+    base_of_support_norm = [parse_float_or_nan(r["base_of_support_norm"]) for r in rows]
+    hip_width_norm = [parse_float_or_nan(r["hip_width_norm"]) for r in rows]
+
+    # Symmetry ratios: mean(min/max) (1.0 = perfectly symmetric)
+    def sym_ratio(a: list[float], b: list[float]) -> float:
+        valid = [(x, y) for x, y in zip(a, b) if math.isfinite(x) and math.isfinite(y) and x > 1e-8 and y > 1e-8]
+        if not valid:
+            return float("nan")
+        return sum(min(x, y) / max(x, y) for x, y in valid) / len(valid)
+
+    knee_sym = sym_ratio(knee_width_norm, knee_width_norm)
+    ankle_sym = sym_ratio(ankle_width_norm, ankle_width_norm)
+
+    fig, axes = plt.subplots(4, 1, figsize=(13, 11), sharex=True)
 
     axes[0].plot(valid_t, l_hip, label="Left hip", linewidth=1.4)
     axes[0].plot(valid_t, r_hip, label="Right hip", linewidth=1.4)
@@ -414,18 +522,25 @@ def run(
     axes[1].grid(alpha=0.3)
     axes[1].legend(loc="best")
 
-    for i, t in enumerate(left_events):
-        axes[2].vlines(t, 0.6, 1.0, color="tab:blue", alpha=0.8, linewidth=1.1, label="Left heel-strike" if i == 0 else None)
-    for i, t in enumerate(right_events):
-        axes[2].vlines(t, 0.0, 0.4, color="tab:orange", alpha=0.8, linewidth=1.1, label="Right heel-strike" if i == 0 else None)
+    # Gait timing: combined heel-strike from the lower heel per frame (view-invariant)
+    for i, t in enumerate(all_events):
+        axes[2].vlines(t, 0.0, 1.0, color="tab:red", alpha=0.8, linewidth=1.1, label="Heel-strike" if i == 0 else None)
 
     axes[2].set_ylim(-0.1, 1.1)
-    axes[2].set_yticks([0.2, 0.8])
-    axes[2].set_yticklabels(["Right", "Left"])
-    axes[2].set_title("Gait Timing (Heel-Strike Events)")
+    axes[2].set_yticks([])
+    axes[2].set_title(f"Gait Timing (Combined Heel-Strikes, n={len(all_events)})")
     axes[2].set_xlabel("time (s)")
     axes[2].grid(axis="x", alpha=0.3)
     axes[2].legend(loc="best")
+
+    axes[3].plot(valid_t, hip_width_norm, label="Hip width", linewidth=1.2, alpha=0.7)
+    axes[3].plot(valid_t, knee_width_norm, label="Knee width", linewidth=1.2, alpha=0.7)
+    axes[3].plot(valid_t, ankle_width_norm, label="Ankle width", linewidth=1.2, alpha=0.7)
+    axes[3].plot(valid_t, base_of_support_norm, label="Base of support (heel-heel)", linewidth=1.2, alpha=0.7)
+    axes[3].set_ylabel("normalized")
+    axes[3].set_title("Limb Widths & Step Length (shoulder-width normalized)")
+    axes[3].grid(alpha=0.3)
+    axes[3].legend(loc="best")
 
     fig.suptitle(f"{video_path.name} | Segment {segment_tag}", fontsize=12)
     fig.tight_layout()
@@ -444,6 +559,10 @@ def run(
         "lock_rejected_frames": lock_rejected_frames if single_person_lock else None,
         "left_events": len(left_events),
         "right_events": len(right_events),
+        "combined_heel_strikes": len(all_events),
+        "cadence_combined": f"{len(all_events) / seconds:.2f}" if seconds > 0 else None,
+        "knee_width_symmetry": f"{knee_sym:.4f}" if math.isfinite(knee_sym) else None,
+        "ankle_width_symmetry": f"{ankle_sym:.4f}" if math.isfinite(ankle_sym) else None,
         "angles_csv": str(angles_csv),
         "events_csv": str(events_csv),
         "segment_video": str(segment_video) if export_segment_video else None,

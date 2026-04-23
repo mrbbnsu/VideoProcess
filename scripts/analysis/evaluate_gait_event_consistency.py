@@ -74,25 +74,38 @@ def detect_heel_strikes(
     if len(times) < 3:
         return []
 
-    y = moving_average(y_values, smooth_window)
+    # Step 1: remove linear drift (camera moving toward/away from person)
+    y = list(y_values)
+    if len(y) >= 3:
+        n = len(y)
+        t_arr = list(range(n))
+        t_mean = sum(t_arr) / n
+        y_mean = sum(y) / n
+        slope = sum((t - t_mean) * (v - y_mean) for t, v in zip(t_arr, y)) / sum(
+            (t - t_mean) ** 2 for t in t_arr
+        )
+        y = [v - slope * i for i, v in enumerate(y)]
 
-    # Adaptive floor for low-motion sequences: combine absolute and relative threshold.
+    # Step 2: smooth to suppress high-frequency noise
+    y = moving_average(y, smooth_window)
+
     signal_range = max(y) - min(y)
-    adaptive_threshold = max(peak_threshold, signal_range * 0.015)
+    # Require minimum prominence: heel-strike dip must be at least 3% of total range
+    adaptive_threshold = max(peak_threshold, signal_range * 0.03)
 
-    # Heel-strike proxy: heel point reaches a local maximum in image y (lowest in world).
+    # Step 3: find local minima (y[i] <= neighbors) with prominence threshold
     peak_indices: list[int] = []
     last_peak_time = None
     min_gap_sec = min_event_gap_ms / 1000.0
 
     for i in range(1, len(y) - 1):
-        if not (y[i] >= y[i - 1] and y[i] >= y[i + 1]):
+        if not (y[i] <= y[i - 1] and y[i] <= y[i + 1]):
             continue
 
         lo = max(0, i - 4)
         hi = min(len(y), i + 5)
-        local_min = min(y[lo:hi])
-        if (y[i] - local_min) < adaptive_threshold:
+        local_max = max(y[lo:hi])
+        if (local_max - y[i]) < adaptive_threshold:
             continue
 
         t = times[i]
