@@ -16,7 +16,7 @@ DEFAULT_PARSED_CSV = str(PROJECT_ROOT / "data/Accessment/VFile_parsed.csv")
 DEFAULT_VIDEO_ROOT = str(PROJECT_ROOT / "data/Accessment")
 DEFAULT_SECONDS = 10.0
 DEFAULT_OUTPUT_DIR = str(PROJECT_ROOT / "output/export")
-line_number = 1
+line_numbers: list[int] = [1, 2, 3, 4, 5]
 
 
 def parse_start_seconds(value: str) -> float:
@@ -121,43 +121,47 @@ def main() -> None:
     if seconds <= 0:
         raise ValueError("seconds must be > 0")
 
-    row, file_line = read_target_row(parsed_csv, line_number, "data")
-
     video_root = Path(DEFAULT_VIDEO_ROOT)
     if not video_root.is_absolute():
         video_root = (PROJECT_ROOT / video_root).resolve()
 
-    video_path = resolve_video(row_get(row, "video_name", ""), video_root)
-    start_seconds = parse_start_seconds(row_get(row, "start_seconds", "") or row_get(row, "start_time", ""))
-    crop_left, crop_right = to_crop_ratios(
-        row_get(row, "subject_pos_side", ""), row_get(row, "subject_crop_ratio", "")
-    )
+    for idx, line_number in enumerate(line_numbers):
+        print(f"\n{'='*60}")
+        print(f"Processing line {line_number} ({idx + 1}/{len(line_numbers)})")
+        print(f"{'='*60}")
 
-    print("Resolved row")
-    print(f"- parsed_csv={parsed_csv.as_posix()}")
-    print(f"- selected_file_line={file_line}")
-    print(f"- video_name={row_get(row, 'video_name', '')}")
-    print(f"- resolved_video={video_path.as_posix()}")
-    print(f"- start_seconds={start_seconds}")
-    print(f"- subject_pos_side={row_get(row, 'subject_pos_side', '')}")
-    print(f"- subject_crop_ratio={row_get(row, 'subject_crop_ratio', '')}")
-    print(f"- crop_left_ratio={crop_left}")
-    print(f"- crop_right_ratio={crop_right}")
+        row, file_line = read_target_row(parsed_csv, line_number, "data")
 
-    result = run(
-        video=video_path,
-        start_seconds=start_seconds,
-        seconds=seconds,
-        output_dir=output_dir,
-        crop_left_ratio=crop_left,
-        crop_right_ratio=crop_right,
-        single_person_lock=True,
-        export_segment_video=True,
-    )
+        video_path = resolve_video(row_get(row, "video_name", ""), video_root)
+        start_seconds = parse_start_seconds(row_get(row, "start_seconds", "") or row_get(row, "start_time", ""))
+        crop_left, crop_right = to_crop_ratios(
+            row_get(row, "subject_pos_side", ""), row_get(row, "subject_crop_ratio", "")
+        )
 
-    print("Result:")
-    for k, v in result.items():
-        print(f"  {k}={v}")
+        print(f"- parsed_csv={parsed_csv.as_posix()}")
+        print(f"- selected_file_line={file_line}")
+        print(f"- video_name={row_get(row, 'video_name', '')}")
+        print(f"- resolved_video={video_path.as_posix()}")
+        print(f"- start_seconds={start_seconds}")
+        print(f"- subject_pos_side={row_get(row, 'subject_pos_side', '')}")
+        print(f"- subject_crop_ratio={row_get(row, 'subject_crop_ratio', '')}")
+        print(f"- crop_left_ratio={crop_left}")
+        print(f"- crop_right_ratio={crop_right}")
+
+        result = run(
+            video=video_path,
+            start_seconds=start_seconds,
+            seconds=seconds,
+            output_dir=output_dir,
+            crop_left_ratio=crop_left,
+            crop_right_ratio=crop_right,
+            single_person_lock=True,
+            export_segment_video=True,
+        )
+
+        print("Result:")
+        for k, v in result.items():
+            print(f"  {k}={v}")
 
 
 if __name__ == "__main__":

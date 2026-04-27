@@ -10,7 +10,7 @@ from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.core import base_options
 from mediapipe import Image, ImageFormat
 
-from scripts.analysis.evaluate_gait_event_consistency import detect_heel_strikes, match_events  # noqa: E402
+from scripts.analysis.evaluate_gait_event_consistency import detect_heel_strikes  # noqa: E402
 
 
 LOWER_BODY_IDS = [23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
@@ -171,8 +171,8 @@ def run(
     output_dir: str | Path = "output/single_video",
     min_vis: float = 0.3,
     smooth_window: int = 5,
-    min_event_gap_ms: float = 350.0,
-    peak_threshold: float = 0.001,
+    min_event_gap_ms: float = 500.0,
+    peak_threshold: float = 0.01,
     export_segment_video: bool = False,
     crop_left_ratio: float = 0.0,
     crop_right_ratio: float = 0.0,
@@ -232,7 +232,6 @@ def run(
     rows: list[dict[str, str]] = []
     lheel_y: list[tuple[float, float]] = []  # (time, y_rel_hip)
     rheel_y: list[tuple[float, float]] = []  # (time, y_rel_hip)
-    combined_y: list[tuple[float, float]] = []  # (time, min(l_rel, r_rel)) for cadence
 
     frame_idx = 0
     lock_rejected_frames = 0
@@ -382,15 +381,6 @@ def run(
                 out["right_heel_y"] = f"{r_rel:.6f}"
                 rheel_y.append((t, r_rel))
 
-            # Use the lower heel per frame (closer to ground = stance foot).
-            # This gives correct cadence even when MediaPipe L/R assignment is unreliable.
-            if l_rel is not None and r_rel is not None:
-                combined_y.append((t, min(l_rel, r_rel)))
-            elif l_rel is not None:
-                combined_y.append((t, l_rel))
-            elif r_rel is not None:
-                combined_y.append((t, r_rel))
-
             # Distance metrics normalized by shoulder width
             sw = joint_distance(lms, 11, 12, min_vis)  # shoulder width (anchor)
             if sw is not None and sw > 1e-8:
@@ -456,23 +446,6 @@ def run(
         [t for t, _ in rheel_y], [y for _, y in rheel_y],
         smooth_window, min_event_gap_ms, peak_threshold
     )
-    # Signal ranges for choosing the more reliable foot's time per pair
-    l_y_all = [y for _, y in lheel_y]
-    r_y_all = [y for _, y in rheel_y]
-    l_range = max(l_y_all) - min(l_y_all) if l_y_all else 0.0
-    r_range = max(r_y_all) - min(r_y_all) if r_y_all else 0.0
-    max_match_sec = 0.25
-    used_r = set()
-    all_events: list[float] = []
-    for lt in left_events:
-        for ri, rt in enumerate(right_events):
-            if ri in used_r:
-                continue
-            if abs(lt - rt) <= max_match_sec:
-                chosen_t = lt if l_range >= r_range else rt
-                all_events.append(chosen_t)
-                used_r.add(ri)
-                break
 
     with events_csv.open("w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
@@ -481,8 +454,6 @@ def run(
             writer.writerow(["left", f"{t:.6f}"])
         for t in right_events:
             writer.writerow(["right", f"{t:.6f}"])
-        for t in all_events:
-            writer.writerow(["combined", f"{t:.6f}"])
 
     valid_t = [float(r["time_s"]) for r in rows]
     l_hip = [parse_float_or_nan(r["left_hip_deg"]) for r in rows]
@@ -522,13 +493,16 @@ def run(
     axes[1].grid(alpha=0.3)
     axes[1].legend(loc="best")
 
-    # Gait timing: combined heel-strike from the lower heel per frame (view-invariant)
-    for i, t in enumerate(all_events):
-        axes[2].vlines(t, 0.0, 1.0, color="tab:red", alpha=0.8, linewidth=1.1, label="Heel-strike" if i == 0 else None)
+    # Gait timing: left + right heel-strikes
+    all_ev = sorted(left_events + right_events)
+    for i, t in enumerate(all_ev):
+        color = "tab:blue" if t in left_events else "tab:orange"
+        axes[2].vlines(t, 0.0, 1.0, color=color, alpha=0.8, linewidth=1.1,
+                       label="Left" if i == 0 else ("Right" if i == len(left_events) else None))
 
     axes[2].set_ylim(-0.1, 1.1)
     axes[2].set_yticks([])
-    axes[2].set_title(f"Gait Timing (Combined Heel-Strikes, n={len(all_events)})")
+    axes[2].set_title(f"Gait Timing (Left={len(left_events)}, Right={len(right_events)})")
     axes[2].set_xlabel("time (s)")
     axes[2].grid(axis="x", alpha=0.3)
     axes[2].legend(loc="best")
@@ -559,8 +533,8 @@ def run(
         "lock_rejected_frames": lock_rejected_frames if single_person_lock else None,
         "left_events": len(left_events),
         "right_events": len(right_events),
-        "combined_heel_strikes": len(all_events),
-        "cadence_combined": f"{len(all_events) / seconds:.2f}" if seconds > 0 else None,
+        "total_heel_strikes": len(left_events) + len(right_events),
+        "cadence": f"{(len(left_events) + len(right_events)) / seconds:.2f}" if seconds > 0 else None,
         "knee_width_symmetry": f"{knee_sym:.4f}" if math.isfinite(knee_sym) else None,
         "ankle_width_symmetry": f"{ankle_sym:.4f}" if math.isfinite(ankle_sym) else None,
         "angles_csv": str(angles_csv),
